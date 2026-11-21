@@ -1,0 +1,23 @@
+# Local environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+build/
+*.bin
+*.elf
+*.map
+received_images/
+.env
+.env.*
+secrets.h
+credentials.h
+
+# Private course documents/chat exports and distribution archives
+*.pdf
+*.pptx
+*.zip
+
+# Historical alternatives: not the selected two-ESP implementation
+JarKom_Kelompok2_Starter/
+SPI_Dari_Shared_Chat/
