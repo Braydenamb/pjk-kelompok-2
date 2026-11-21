@@ -12,6 +12,9 @@ received_images/
 .env.*
 secrets.h
 credentials.h
+local_config.h
+config.local.json
+*.part
 
 # Private course documents/chat exports and distribution archives
 *.pdf

@@ -1,61 +1,53 @@
 # PJK Kelompok 2 — UART → SPI → MQTT → LoRa
 
-Proyek Praktikum Jaringan Komunikasi: pengiriman gambar dari Laptop A ke Laptop B menggunakan **dua ESP32 DevKit V1** dan **dua E220-900T22D**.
-
-## Rancangan yang dipilih
+Dua ESP32 dipakai bergantian untuk pengiriman gambar:
 
 ```text
-Laptop A (pengirim + broker MQTT)
-  -> USB -> ESP A
-  -> UART -> ESP B
-  -> SPI -> ESP A
-  -> MQTT melalui broker Laptop A -> ESP B
-  -> LoRa melalui pasangan E220 -> ESP A
-  -> Wi-Fi/TCP -> Laptop B (penerima)
+Laptop A (sender + MQTT broker)
+  → USB → ESP A → UART → ESP B → SPI → ESP A
+  → MQTT melalui broker Laptop A → ESP B
+  → E220 LoRa → ESP A → Wi-Fi TCP → Laptop B (receiver)
 ```
 
-ESP A dan ESP B digunakan ulang pada tiap tahap; diagram tidak menunjukkan board tambahan. SPI master adalah ESP B, slave adalah ESP A. Kedua board harus tetap berdekatan karena ada link kabel UART dan SPI.
+**Workflow software siap dijalankan lokal; belum terverifikasi end-to-end pada hardware.** Tidak ada board USB yang terdeteksi saat pemeriksaan. Password Wi-Fi dan IP receiver belum diberikan; tidak ada flash, perubahan radio, firewall atau Wi-Fi yang dilakukan.
 
-## Source
+## Mulai dari root repository
 
-Implementasi referensi dari paket tim berada di:
-
-[`Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32/`](Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32/)
-
-Baca README di folder tersebut untuk pin map, dependensi, format paket, dan urutan menjalankan sistem. File firmware dan script diimpor dari paket referensi tim; bukan klaim implementasi baru atau hasil pengujian berhasil.
-
-## Status dan batasan
-
-**Belum siap demo end-to-end.** Lihat [hasil review dan bug recovery yg masih terbuka](docs/KNOWN_ISSUES.md). Pemanggilan SPI async dan READY sudah diperbaiki serta ESP A dikompilasi ulang; masih perlu perbaikan timeout MQTT/LoRa dan identitas sesi sebelum dianggap andal. Dua tes kontrak source SPI ditambahkan selain lima tes TCP lokal; tes kontrak bukan uji timing hardware.
-
-- Rancangan dua-ESP loop dipilih oleh tim; persetujuan asisten atas topologi tetap perlu dipastikan.
-- Firmware dua-ESP **ESP32_A, ESP32_B, dan E220_Config berhasil dikompilasi** dengan Arduino CLI, `esp32:esp32:esp32`, ESP32 core 3.3.12, ESP32DMASPI 0.8.0 dan PubSubClient 2.8.
-- **Lima tes TCP lokal lulus**: PNG identik byte-per-byte, ACK paket duplikat, penolakan CRC file salah, penolakan ukuran file salah, dan penolakan urutan paket salah. Ini tes host lokal, bukan simulasi bukti radio.
-- Mosquitto berhasil diuji CONNECT/SUBSCRIBE/PUBLISH melalui loopback lokal; akses LAN dari ESP belum diuji.
-- Firmware **belum di-upload atau diuji UART/SPI/MQTT/LoRa end-to-end** pada perangkat. Board belum terdeteksi saat pemeriksaan.
-- Hasil compile starter empat-ESP yang lama tidak berlaku sebagai validasi firmware ini.
-- E220 memakai UART, bukan antarmuka SPI SX1278. Jangan menggunakan wiring starter lama.
-- Periksa konfigurasi kanal, daya, antena, airtime/duty cycle dan ketentuan lab sebelum menyalakan radio. Nilai contoh dalam source bukan jaminan kepatuhan regulasi.
-- Konfigurasi broker anonymous hanya untuk LAN laboratorium tepercaya; jangan buka ke internet.
-- Jangan commit password Wi-Fi, token, atau kredensial nyata. Source awal menggunakan placeholder.
-
-## Laptop pengirim Linux
-
-Dependensi Arduino: ESP32 board package, ESP32DMASPI, PubSubClient. Jangan menganggap semua dependensi tersedia hanya karena kode sudah ada.
-
-Contoh penyiapan Python dari **root repository**:
-
-```bash
+```sh
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-PROJECT=Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32
-python "$PROJECT/Laptop_A/send_image.py" --help
+.venv/bin/python -m pip install -r requirements.txt
+./run_sender.sh preflight            # inventory; exit 1 bila belum ada board/config
+./run_sender.sh configure            # input privat lokal, bukan lewat chat
+./run_sender.sh build                # compile A/B/E220; TIDAK upload/configure radio
 ```
 
-Penerima menyimpan transfer berjalan sebagai `.part` dan memindahkannya menjadi file gambar final hanya setelah ukuran serta CRC seluruh file cocok. END yang gagal validasi tidak diberi ACK sukses; transfer gagal perlu diperiksa dan diulang, bukan dianggap pulih otomatis.
+Setelah wiring/power/radio disetujui lab, identitas/port board dicocokkan dan firmware **kedua board** di-upload manual:
 
-Saat pengujian gunakan port serial Linux yang benar, misalnya `/dev/ttyUSB0`, bukan `COM6`. Cocokkan port dengan board fisik sebelum upload. Isi Wi-Fi dan IP broker/penerima secara lokal sebelum pengujian.
+```sh
+# Laptop B (jalankan dahulu)
+./run_receiver.sh --bind 0.0.0.0 --port 5001 --output ./received_images
+# Laptop A
+./run_sender.sh                      # pilih port + gambar lewat prompt
+# atau eksplisit; ganti port/file setelah dicocokkan
+./run_sender.sh send --port /dev/ttyUSB0 --file ./small.png --lab-approved
+```
 
-PDF percakapan, slide kuliah, ZIP, environment Python, cache, dan alternatif starter lama sengaja tidak dipublikasikan.
+[Petunjuk lengkap: prasyarat, pin map, private config, upload manual, broker lifecycle, recovery dan diagnosis](docs/LOCAL_WORKFLOW.md).
+
+- Launcher memakai `.venv` proyek; tidak memilih/flash board diam-diam. Pilihan eksplisit tetap wajib meskipun hanya satu port.
+- Broker managed terikat ke IP/port lokal yang dipilih dan hanya hidup selama invocation `send`; dihentikan saat selesai/error/Ctrl-C. Broker external hanya diprobe, tidak disentuh. Anonymous MQTT hanya untuk LAN lab tepercaya.
+- Kredensial masuk `local_config.h` ignored mode600, endpoint nonsecret masuk `config.local.json` ignored; contoh header sanitasi disediakan. Jangan commit header lokal atau binary firmware berkredensial.
+- Semua komponen memakai **wire v2 `K2I2`** dengan session ID di frame/ACK. Update kedua firmware dan kedua script bersamaan; tidak kompatibel dengan paket referensi v1.
+- MQTT receipt punya timeout/retry bounded melalui SPI; LoRa retry exhaustion membersihkan pending dan mengirim error upstream. ABORT/new-session membatalkan kerja lama. Jeda radio minimum 10 detik dan pin map tetap dipertahankan.
+- Receiver hanya mempublikasikan file final setelah ukuran+CRC cocok; transfer berjalan/gagal tetap `.part`.
+
+## Bukti software dan batasnya
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+./run_sender.sh build
+```
+
+Pengujian mencakup TCP loopback nyata, Mosquitto loopback nyata beserta cleanup proses, kontrak wire Python/C++ dan retry native, source guards SPI, dan unit test launcher/config. **Bukan uji radio/MCU**. Ketiga sketch dikompilasi dengan `esp32:esp32:esp32`, core3.3.12, ESP32DMASPI0.8.0, PubSubClient2.8. Lihat [status/batasan](docs/KNOWN_ISSUES.md).
+
+Implementasi kerja berbasis source tim berada di [`Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32/`](Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32/). Riwayat git menyimpan versi impor. PDF/PPTX/ZIP privat, `.venv`, cache, dan starter alternatif tetap tidak dipublikasikan. Persetujuan asisten atas loop dua-node dan pemeriksaan model/catu/antena/kanal/daya/duty-cycle E220 tetap diperlukan sebelum operasi fisik.

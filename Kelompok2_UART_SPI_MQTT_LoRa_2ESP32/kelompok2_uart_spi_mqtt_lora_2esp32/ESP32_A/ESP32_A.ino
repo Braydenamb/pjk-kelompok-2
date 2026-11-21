@@ -4,13 +4,11 @@
 #include <vector>
 #include "protocol.h"
 
-// ===== EDIT THESE SETTINGS =====
-const char *WIFI_SSID = "GANTI_NAMA_WIFI";
-const char *WIFI_PASS = "GANTI_PASSWORD_WIFI";
-IPAddress BROKER_IP(192, 168, 1, 10);       // IPv4 Laptop A
-IPAddress LAPTOP_B_IP(192, 168, 1, 11);     // IPv4 Laptop B
-const uint16_t TCP_PORT = 5001;
-// ===============================
+#if __has_include("local_config.h")
+#include "local_config.h"
+#else
+#include "config.example.h"
+#endif
 
 static const char *TOPIC_DATA    = "kelompok2/image/spi_to_mqtt";
 static const char *TOPIC_READY   = "kelompok2/control/ready";
@@ -43,6 +41,7 @@ WiFiClient tcpClient;
 ESP32DMASPI::Slave spiSlave;
 QueueHandle_t spiQueue = nullptr;
 
+uint32_t activeSession = 0;
 uint8_t hostBuf[FRAME_SIZE];
 size_t hostCount = 0;
 
@@ -181,36 +180,67 @@ void spiSlaveTask(void *parameter) {
   }
 }
 
+void resetTransfer() {
+  hasMqttPending = false;
+  hasTcpPending = false;
+  tcpFrameSent = false;
+  tcpAckReceived = false;
+  loraAckPending = false;
+  waitingUartAck = false;
+  lastLoRaAckSeq = 0xFFFFFFFFUL;
+  tcpLineLen = 0;
+  tcpClient.stop(); // discard old ACK stream and any partial TCP frame
+  xQueueReset(spiQueue);
+}
+
 void processHostSerial() {
   while (Serial.available()) {
     hostBuf[hostCount++] = (uint8_t)Serial.read();
-
-    if (hostCount == FRAME_SIZE) {
-      hostCount = 0;
-
-      if (!validFrame(hostBuf) || !isImageFrame(hostBuf)) {
-        Serial.println("ERR:HOST_FRAME");
-        continue;
-      }
-
-      LinkUART.write(hostBuf, FRAME_SIZE);
-      LinkUART.flush();
+    if (hostCount != FRAME_SIZE) continue;
+    if (!validFrame(hostBuf)) {
+      memmove(hostBuf, hostBuf + 1, FRAME_SIZE - 1);
+      hostCount = FRAME_SIZE - 1;
+      continue;
     }
+    hostCount = 0;
+    uint32_t session = frameSession(hostBuf);
+    uint8_t type = frameType(hostBuf);
+    if (type == TYPE_START && frameSeq(hostBuf) == 0 && session != activeSession) {
+      resetTransfer();
+      activeSession = session;
+    }
+    if (session != activeSession) continue;
+    if (type == TYPE_ABORT) {
+      // Control cancellation is best effort; next START is authoritative.
+      if (tcpClient.connected()) tcpClient.write(hostBuf, FRAME_SIZE);
+      resetTransfer();
+      activeSession = 0;
+    } else if (!isImageFrame(hostBuf)) continue;
+    LinkUART.write(hostBuf, FRAME_SIZE);
+    LinkUART.flush();
   }
 }
 
 void processUartAck() {
   while (LinkUART.available()) {
     uartAckBuf[uartAckCount++] = (uint8_t)LinkUART.read();
-
-    if (uartAckCount == FRAME_SIZE) {
-      uartAckCount = 0;
-
-      if (validFrame(uartAckBuf) &&
-          frameType(uartAckBuf) == TYPE_ACK &&
-          waitingUartAck &&
-          frameSeq(uartAckBuf) == waitingUartAckSeq) {
-        Serial.printf("ACK:%lu\n", (unsigned long)waitingUartAckSeq);
+    if (uartAckCount != FRAME_SIZE) continue;
+    if (!validFrame(uartAckBuf)) {
+      memmove(uartAckBuf, uartAckBuf + 1, FRAME_SIZE - 1);
+      uartAckCount = FRAME_SIZE - 1;
+      continue;
+    }
+    uartAckCount = 0;
+    if (frameSession(uartAckBuf) == activeSession) {
+      if (frameType(uartAckBuf) == TYPE_ERROR) {
+        Serial.printf("ERR:%lu:%lu:%.*s\n", (unsigned long)activeSession,
+          (unsigned long)frameSeq(uartAckBuf), (int)frameLen(uartAckBuf),
+          (const char *)(uartAckBuf + HEADER_SIZE));
+        resetTransfer();
+      } else if (frameType(uartAckBuf) == TYPE_ACK && waitingUartAck &&
+                 frameSeq(uartAckBuf) == waitingUartAckSeq) {
+        Serial.printf("ACK:%lu:%lu\n", (unsigned long)activeSession,
+                      (unsigned long)waitingUartAckSeq);
         waitingUartAck = false;
       }
     }
@@ -224,6 +254,8 @@ void processSPIQueue() {
     }
   }
 
+  if (hasMqttPending && frameSession(mqttPendingFrame) != activeSession) hasMqttPending = false;
+
   if (hasMqttPending && mqtt.connected() &&
       peerSeen && (millis() - lastPeerSeenMs < 6000)) {
     if (mqtt.publish(TOPIC_DATA, mqttPendingFrame, FRAME_SIZE, false)) {
@@ -234,7 +266,7 @@ void processSPIQueue() {
 
 void sendLoRaAck(uint32_t seq) {
   uint8_t ack[FRAME_SIZE];
-  makeFrame(TYPE_ACK, seq, nullptr, 0, ack);
+  makeFrame(TYPE_ACK, activeSession, seq, nullptr, 0, ack);
 
   if (millis() - lastLoRaTxMs < LORA_MIN_GAP_MS) return;
   if (!waitAuxHigh(3000)) return;
@@ -250,7 +282,7 @@ void sendLoRaAck(uint32_t seq) {
 }
 
 void handleLoRaFrame(const uint8_t *frame) {
-  if (!isImageFrame(frame)) return;
+  if (!isImageFrame(frame) || frameSession(frame) != activeSession) return;
 
   uint32_t seq = frameSeq(frame);
 
@@ -302,8 +334,8 @@ void processTcpAckLines() {
 
     if (c == '\n') {
       tcpLine[tcpLineLen] = '\0';
-      unsigned long seq = 0;
-      if (sscanf(tcpLine, "ACK:%lu", &seq) == 1 &&
+      unsigned long session = 0, seq = 0;
+      if (sscanf(tcpLine, "ACK:%lu:%lu", &session, &seq) == 2 && session == activeSession &&
           hasTcpPending && (uint32_t)seq == tcpPendingSeq) {
         tcpAckReceived = true;
         tcpAckSeq = (uint32_t)seq;
@@ -323,6 +355,9 @@ void serviceTCP() {
       tcpFrameSent = true;
       lastTcpSendMs = millis();
       tcpRetryCount++;
+    } else {
+      tcpClient.stop();
+      tcpLineLen = 0;
     }
   }
 
@@ -371,7 +406,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  mqtt.setServer(BROKER_IP, 1883);
+  mqtt.setServer(BROKER_IP, MQTT_PORT);
   mqtt.setBufferSize(512);
   mqtt.setCallback(mqttCallback);
 
@@ -403,7 +438,7 @@ void loop() {
     lastReadyPrintMs = millis();
   }
 
-  if (hostReady) processHostSerial();
+  processHostSerial(); // cancellation/new sessions must work even if network is down
 
   processSPIQueue();
   processLoRaInput();

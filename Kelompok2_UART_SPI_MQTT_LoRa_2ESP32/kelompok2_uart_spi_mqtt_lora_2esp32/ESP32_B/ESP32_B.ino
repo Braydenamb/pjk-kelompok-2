@@ -2,12 +2,13 @@
 #include <PubSubClient.h>
 #include <ESP32DMASPIMaster.h>
 #include "protocol.h"
+#include "reliability.h"
 
-// ===== EDIT THESE SETTINGS (must match ESP32 A) =====
-const char *WIFI_SSID = "GANTI_NAMA_WIFI";
-const char *WIFI_PASS = "GANTI_PASSWORD_WIFI";
-IPAddress BROKER_IP(192, 168, 1, 10);  // IPv4 Laptop A
-// ====================================================
+#if __has_include("local_config.h")
+#include "local_config.h"
+#else
+#include "config.example.h"
+#endif
 
 static const char *TOPIC_DATA    = "kelompok2/image/spi_to_mqtt";
 static const char *TOPIC_READY   = "kelompok2/control/ready";
@@ -43,6 +44,11 @@ uint8_t *spiRxBuf = nullptr;
 uint8_t uartBuf[FRAME_SIZE];
 size_t uartCount = 0;
 
+uint32_t activeSession = 0;
+Pending mqttPending;
+Pending radioPending;
+uint8_t lastAck[FRAME_SIZE];
+bool haveLastAck = false;
 uint8_t mqttFrame[FRAME_SIZE];
 bool haveMqttFrame = false;
 bool waitingMqtt = false;
@@ -52,9 +58,7 @@ uint8_t loraRxBuf[FRAME_SIZE];
 size_t loraRxCount = 0;
 
 bool loraWaitingAck = false;
-unsigned long lastLoRaSendMs = 0;
 unsigned long lastLoRaTxMs = 0;
-uint8_t loraRetries = 0;
 
 bool mqttReady = false;
 unsigned long lastReadyPublishMs = 0;
@@ -80,9 +84,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
   if (strcmp(topic, TOPIC_DATA) == 0 &&
       length == FRAME_SIZE && waitingMqtt) {
     if (validFrame(payload) && isImageFrame(payload) &&
-        frameSeq(payload) == waitingSeq) {
+        frameSession(payload) == activeSession && frameSeq(payload) == waitingSeq && !haveMqttFrame) {
       memcpy(mqttFrame, payload, FRAME_SIZE);
       haveMqttFrame = true;
+      waitingMqtt = false;
+      mqttPending.clear();
+      radioPending.begin(activeSession, waitingSeq, millis());
     }
   }
 }
@@ -117,41 +124,78 @@ bool waitForSPISlaveReady(uint32_t timeoutMs) {
   return true;
 }
 
+void clearTransfer() {
+  waitingMqtt = false;
+  haveMqttFrame = false;
+  loraWaitingAck = false;
+  mqttPending.clear();
+  radioPending.clear();
+}
+
+void failTransfer(const char *reason) {
+  uint8_t error[FRAME_SIZE];
+  makeFrame(TYPE_ERROR, activeSession, waitingSeq,
+            (const uint8_t *)reason, strlen(reason), error);
+  LinkUART.write(error, FRAME_SIZE);
+  LinkUART.flush();
+  Serial.printf("ERR:%s\n", reason);
+  clearTransfer();
+}
+
+bool forwardSPI() {
+  memset(spiTxBuf, 0, SPI_SIZE);
+  memset(spiRxBuf, 0, SPI_SIZE);
+  memcpy(spiTxBuf, uartBuf, FRAME_SIZE);
+  if (!waitForSPISlaveReady(1000)) return false;
+  return spiMaster.transfer(spiTxBuf, spiRxBuf, SPI_SIZE, 5000) >= FRAME_SIZE;
+}
+
 void processUARTInput() {
-  if (!mqttReady || waitingMqtt || haveMqttFrame || loraWaitingAck) return;
-
+  // Always drain control traffic; a fresh START must be able to cancel old work.
   while (LinkUART.available()) {
-    uartBuf[uartCount++] = (uint8_t)LinkUART.read();
-
-    if (uartCount == FRAME_SIZE) {
-      uartCount = 0;
-
-      if (!validFrame(uartBuf) || !isImageFrame(uartBuf)) {
-        Serial.println("ERR:UART_FRAME");
-        continue;
-      }
-
-      waitingSeq = frameSeq(uartBuf);
-      waitingMqtt = true;
-
-      memset(spiTxBuf, 0, SPI_SIZE);
-      memset(spiRxBuf, 0, SPI_SIZE);
-      memcpy(spiTxBuf, uartBuf, FRAME_SIZE);
-
-      if (!waitForSPISlaveReady(5000)) {
-        Serial.println("ERR:SPI_SLAVE_NOT_READY");
-        waitingMqtt = false;
-        return;
-      }
-
-      size_t received = spiMaster.transfer(spiTxBuf, spiRxBuf, SPI_SIZE, 5000);
-      if (received < FRAME_SIZE) {
-        Serial.println("ERR:SPI_TRANSFER");
-        waitingMqtt = false;
-      }
-      return;
+    uint8_t byteIn = (uint8_t)LinkUART.read();
+    // Keep retry payload in uartBuf; assemble separately while busy.
+    static uint8_t incoming[FRAME_SIZE];
+    incoming[uartCount++] = byteIn;
+    if (uartCount != FRAME_SIZE) continue;
+    if (!validFrame(incoming)) {
+      memmove(incoming, incoming + 1, FRAME_SIZE - 1);
+      uartCount = FRAME_SIZE - 1;
+      continue;
     }
+    uartCount = 0;
+    uint32_t session = frameSession(incoming);
+    uint8_t type = frameType(incoming);
+    if (type == TYPE_START && frameSeq(incoming) == 0 && session != activeSession) {
+      clearTransfer();
+      activeSession = session;
+      haveLastAck = false;
+    }
+    if (session != activeSession) continue;
+    if (type == TYPE_ABORT) {
+      clearTransfer(); activeSession = 0; haveLastAck = false;
+      continue;
+    }
+    if (!isImageFrame(incoming)) continue;
+    if (haveLastAck && frameSeq(incoming) == frameSeq(lastAck)) {
+      LinkUART.write(lastAck, FRAME_SIZE);
+      LinkUART.flush();
+      continue;
+    }
+    if (waitingMqtt || haveMqttFrame || loraWaitingAck) continue;
+    memcpy(uartBuf, incoming, FRAME_SIZE);
+    waitingSeq = frameSeq(incoming);
+    waitingMqtt = true;
+    mqttPending.begin(activeSession, waitingSeq, millis());
+    if (!forwardSPI()) Serial.println("WARN:SPI_RETRY_PENDING");
   }
+}
+
+void serviceMqttTimeout() {
+  if (!waitingMqtt) return;
+  RetryAction action = mqttPending.poll(millis(), 5000, 2);
+  if (action == RETRY) forwardSPI();
+  else if (action == EXHAUSTED) failTransfer("MQTT_TIMEOUT");
 }
 
 void sendLoRaFrame() {
@@ -162,24 +206,23 @@ void sendLoRaFrame() {
   LoRaUART.flush();
 
   lastLoRaTxMs = millis();
-  lastLoRaSendMs = millis();
   loraWaitingAck = true;
+  radioPending.since = millis();
 }
 
 void handleLoRaAck(const uint8_t *frame) {
   if (frameType(frame) == TYPE_ACK &&
       loraWaitingAck &&
-      frameSeq(frame) == waitingSeq) {
+      frameSession(frame) == activeSession && frameSeq(frame) == waitingSeq) {
     uint8_t uartAck[FRAME_SIZE];
-    makeFrame(TYPE_ACK, waitingSeq, nullptr, 0, uartAck);
+    makeFrame(TYPE_ACK, activeSession, waitingSeq, nullptr, 0, uartAck);
 
     LinkUART.write(uartAck, FRAME_SIZE);
     LinkUART.flush();
 
-    loraWaitingAck = false;
-    waitingMqtt = false;
-    haveMqttFrame = false;
-    loraRetries = 0;
+    memcpy(lastAck, uartAck, FRAME_SIZE);
+    haveLastAck = true;
+    clearTransfer();
 
     Serial.printf("DONE:%lu\n", (unsigned long)waitingSeq);
   }
@@ -206,20 +249,11 @@ void processLoRaAckInput() {
 }
 
 void serviceLoRa() {
-  if (haveMqttFrame && !loraWaitingAck) {
-    sendLoRaFrame();
-  }
-
-  if (loraWaitingAck && millis() - lastLoRaSendMs > 15000) {
-    if (loraRetries < 2) {
-      loraRetries++;
-      loraWaitingAck = false;
-      sendLoRaFrame();
-    } else {
-      Serial.println("ERR:LORA_ACK_TIMEOUT");
-      lastLoRaSendMs = millis();
-    }
-  }
+  if (!haveMqttFrame) return;
+  RetryAction action = radioPending.poll(millis(), 15000, 2);
+  if (action == EXHAUSTED) { failTransfer("LORA_ACK_TIMEOUT"); return; }
+  if (action == RETRY) loraWaitingAck = false;
+  if (!loraWaitingAck) sendLoRaFrame();
 }
 
 void setup() {
@@ -255,7 +289,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  mqtt.setServer(BROKER_IP, 1883);
+  mqtt.setServer(BROKER_IP, MQTT_PORT);
   mqtt.setBufferSize(512);
   mqtt.setCallback(mqttCallback);
 }
@@ -277,6 +311,7 @@ void loop() {
   processLoRaAckInput();
   serviceLoRa();
   processUARTInput();
+  serviceMqttTimeout();
 
   delay(1);
 }

@@ -1,17 +1,23 @@
-# Firmware review: known reliability limitations
+# Reliability status and evidence boundary
 
-## Fixed and checked locally
+## Fixed in the working implementation
 
-- ESP A previously called `trigger()` then `wait()` on ESP32DMASPI 0.8.0. `wait()` invokes `trigger()` internally and receives an empty queued list after the first dispatch. The task now consumes completion via `numTransactionsCompleted()`, `numBytesReceived()` and `error()` before reusing DMA buffers.
-- READY is now set by the hardware post-setup callback, not immediately after asynchronous dispatch, and cleared by the completion callback.
-- ESP A recompiles after these fixes. Two source-level regression guards check API usage and callback registration. These tests do not prove electrical timing or SPI delivery.
-- Host receiver no longer ACKs a failed final whole-file integrity check and only exposes a final image filename after validation. Five real loopback TCP regression tests pass.
+- ESP32DMASPI0.8.0 completion ownership remains `trigger()` then completion/result consumption, never `trigger()` then `wait()`. READY remains driven by hardware post-setup/post-transaction callbacks. Two source guards protect this, not electrical timing.
+- B now retains the original UART frame while waiting for MQTT receipt. A successful QoS0 publish is not considered receipt. B times out at 5 seconds and retries the real SPI→MQTT path twice, then clears pending state and reports `MQTT_TIMEOUT` over UART to A/host.
+- LoRa exhaustion after two ACK retries now clears transaction state and reports `LORA_ACK_TIMEOUT`, instead of permanently holding pending. AUX and the 10-second minimum transmit gap remain intact; radio frequency/power defaults are unchanged.
+- Wire v2 includes a CRC-protected nonzero session ID in every frame and ACK, including UART/LoRa binary ACK and TCP/host text ACK. A/B reject unrelated sessions. A fresh START replaces pending work even while B is busy; ABORT is accepted while busy and cancellation propagates over UART plus best-effort TCP. Recovery is a fresh whole-file transfer, not persistent resume.
+- Receiver deduplicates the exact last frame within the active session (not sequence alone), retires replaced/aborted sessions, and only ACKs END/publishes the final image after size and whole-file CRC validation. `.part` survives failure for diagnosis.
+- Managed local broker lifecycle has a real loopback CONNECT/SUBSCRIBE/PUBLISH and error-cleanup test. It never takes over existing brokers.
 
-## Still unresolved: not demo-ready end-to-end
+See [reproducible workflow and wire specification](LOCAL_WORKFLOW.md).
 
-1. **Lost MQTT message can stall ESP B.** A QoS-0 publish success is not delivery confirmation. ESP B can remain `waitingMqtt` indefinitely after a lost MQTT packet or failed SPI CRC. Requires bounded idempotent retry, timeout and explicit upstream failure reporting.
-2. **No session ID or explicit synchronized abort.** Sender restarts at sequence zero; ESP A deduplicates by sequence only. Aborting after START and restarting a new image can ACK old metadata without forwarding the new START. Resetting only one board can also leave its peer waiting on an old transfer. Proper fix is a transfer/session ID propagated through frames and ACKs, plus an abort/new-session handshake; resetting both boards is only a temporary manual workaround.
-3. **LoRa retry exhaustion stalls ESP B.** After two retries, firmware prints an error but keeps the transaction pending indefinitely. Requires an explicit failed state and safe resynchronization/restart.
-4. **No physical proof yet.** USB port mapping, wiring, radio readback, radio power/spectrum compliance, and UART/SPI/MQTT/LoRa end-to-end image delivery have not been verified.
+## Still unverified / remaining limits
 
-Do not treat a successful build, READY heartbeat, host-only test, or local MQTT test as proof that all four protocol links work. Preserve radio pacing and do not flash or alter radio configuration until hardware/pin mapping and lab-approved settings are confirmed.
+1. **No USB boards detected, no physical proof.** ESP identities, wiring/power, SPI timing, E220 model/readback, regulatory/lab approval and end-to-end transfer remain unverified. Builds, READY and host tests do not prove the four real links.
+2. **Local setup required.** Operator must privately supply credentials/current broker+receiver IPs, build and explicitly upload matching v2 A/B firmware, start receiver and confirm radio safety. Sanitized fallback config compiles but cannot establish the physical network. Launcher never auto-flashes/configures radio.
+3. **Cancellation is best effort.** A severed USB/network link may prevent ABORT delivery. Next fresh-session START is authoritative. Resetting one MCU mid-transfer aborts progress; the host must stop/restart the whole transfer. Receiver process restart loses its in-memory retirement/deduplication set.
+4. **Timing remains a lab starting point.** LoRa ACK wait15s/retries2 and conservative transmit gap10s may need longer waits for real airtime/network latency. Do not shorten pacing or change frequency/power without verified hardware and lab approval. Retries are bounded and may fail rather than conceal poor links.
+5. **Trusted lab only.** MQTT/TCP are anonymous/unencrypted; sessions/CRC are reliability identifiers, not authentication. No concurrent senders, resumable transfer, persistent session history or rate-limited hostile-client protection. Receiver retired-session memory grows during a process lifetime; restart between extended lab runs when idle. One active TCP client/one image frame in flight.
+6. **Host ACK transport has no automatic replay.** An ACK lost on host UART causes sender timeout and best-effort ABORT; user retries a fresh whole-file session. A legitimate completed receiver image may exist even if a final host ACK was lost. Check receiver output rather than assuming missing host ACK means no file.
+
+No hardware was uploaded, no E220 parameters changed, no persistent LAN service started and no firewall/Wi-Fi configuration changed during software verification.
