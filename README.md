@@ -26,6 +26,8 @@ Baca README di folder tersebut untuk pin map, dependensi, format paket, dan urut
 
 ## Status dan batasan
 
+**Belum siap demo end-to-end.** Lihat [hasil review dan bug recovery yg masih terbuka](docs/KNOWN_ISSUES.md). Pemanggilan SPI async dan READY sudah diperbaiki serta ESP A dikompilasi ulang; masih perlu perbaikan timeout MQTT/LoRa dan identitas sesi sebelum dianggap andal. Dua tes kontrak source SPI ditambahkan selain lima tes TCP lokal; tes kontrak bukan uji timing hardware.
+
 - Rancangan dua-ESP loop dipilih oleh tim; persetujuan asisten atas topologi tetap perlu dipastikan.
 - Firmware dua-ESP **ESP32_A, ESP32_B, dan E220_Config berhasil dikompilasi** dengan Arduino CLI, `esp32:esp32:esp32`, ESP32 core 3.3.12, ESP32DMASPI 0.8.0 dan PubSubClient 2.8.
 - **Lima tes TCP lokal lulus**: PNG identik byte-per-byte, ACK paket duplikat, penolakan CRC file salah, penolakan ukuran file salah, dan penolakan urutan paket salah. Ini tes host lokal, bukan simulasi bukti radio.

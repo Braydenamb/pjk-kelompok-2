@@ -129,6 +129,14 @@ void ensureTCP() {
   tcpClient.connect(LAPTOP_B_IP, TCP_PORT);
 }
 
+void IRAM_ATTR spiTransactionArmed(spi_slave_transaction_t *transaction) {
+  digitalWrite(PIN_SPI_READY, HIGH);
+}
+
+void IRAM_ATTR spiTransactionFinished(spi_slave_transaction_t *transaction) {
+  digitalWrite(PIN_SPI_READY, LOW);
+}
+
 void spiSlaveTask(void *parameter) {
   uint8_t *txBuf = spiSlave.allocDMABuffer(SPI_SIZE);
   uint8_t *rxBuf = spiSlave.allocDMABuffer(SPI_SIZE);
@@ -149,17 +157,23 @@ void spiSlaveTask(void *parameter) {
       continue;
     }
 
-    // Queue and trigger first, then tell ESP32 B that the slave is ready.
+    // Dispatch asynchronously; the hardware post-setup callback asserts READY.
     if (!spiSlave.trigger()) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
 
-    digitalWrite(PIN_SPI_READY, HIGH);
-    std::vector<size_t> sizes = spiSlave.wait(5000);
+    // trigger() already dispatched this transaction. wait() would trigger a
+    // second, empty queue and allow the DMA buffer to be reused too soon.
+    // Keep ownership until a result is available, even if the peer is absent.
+    while (spiSlave.numTransactionsCompleted() == 0) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
     digitalWrite(PIN_SPI_READY, LOW);
+    const size_t received = spiSlave.numBytesReceived();
+    const esp_err_t spiError = spiSlave.error();
 
-    if (sizes.size() > 0 && sizes[0] >= FRAME_SIZE && validFrame(rxBuf)) {
+    if (spiError == ESP_OK && received >= FRAME_SIZE && validFrame(rxBuf)) {
       uint8_t frame[FRAME_SIZE];
       memcpy(frame, rxBuf, FRAME_SIZE);
       xQueueSend(spiQueue, frame, pdMS_TO_TICKS(1000));
@@ -347,6 +361,8 @@ void setup() {
   spiSlave.setDataMode(SPI_MODE1);
   spiSlave.setMaxTransferSize(SPI_SIZE);
   spiSlave.setQueueSize(1);
+  spiSlave.setPostSetupCb(spiTransactionArmed);
+  spiSlave.setPostTransCb(spiTransactionFinished);
   if (!spiSlave.begin(VSPI, PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CS)) {
     Serial.println("ERR:SPI_SLAVE_BEGIN");
   }
