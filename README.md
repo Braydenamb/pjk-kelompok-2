@@ -27,7 +27,10 @@ Baca README di folder tersebut untuk pin map, dependensi, format paket, dan urut
 ## Status dan batasan
 
 - Rancangan dua-ESP loop dipilih oleh tim; persetujuan asisten atas topologi tetap perlu dipastikan.
-- Firmware dua-ESP ini **belum diverifikasi kompilasi, upload, atau pengiriman end-to-end** dalam penyiapan repository ini.
+- Firmware dua-ESP **ESP32_A, ESP32_B, dan E220_Config berhasil dikompilasi** dengan Arduino CLI, `esp32:esp32:esp32`, ESP32 core 3.3.12, ESP32DMASPI 0.8.0 dan PubSubClient 2.8.
+- **Lima tes TCP lokal lulus**: PNG identik byte-per-byte, ACK paket duplikat, penolakan CRC file salah, penolakan ukuran file salah, dan penolakan urutan paket salah. Ini tes host lokal, bukan simulasi bukti radio.
+- Mosquitto berhasil diuji CONNECT/SUBSCRIBE/PUBLISH melalui loopback lokal; akses LAN dari ESP belum diuji.
+- Firmware **belum di-upload atau diuji UART/SPI/MQTT/LoRa end-to-end** pada perangkat. Board belum terdeteksi saat pemeriksaan.
 - Hasil compile starter empat-ESP yang lama tidak berlaku sebagai validasi firmware ini.
 - E220 memakai UART, bukan antarmuka SPI SX1278. Jangan menggunakan wiring starter lama.
 - Periksa konfigurasi kanal, daya, antena, airtime/duty cycle dan ketentuan lab sebelum menyalakan radio. Nilai contoh dalam source bukan jaminan kepatuhan regulasi.
@@ -38,14 +41,18 @@ Baca README di folder tersebut untuk pin map, dependensi, format paket, dan urut
 
 Dependensi Arduino: ESP32 board package, ESP32DMASPI, PubSubClient. Jangan menganggap semua dependensi tersedia hanya karena kode sudah ada.
 
-Contoh penyiapan Python (jalankan di folder implementasi):
+Contoh penyiapan Python dari **root repository**:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pyserial
-python Laptop_A/send_image.py --help
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+PROJECT=Kelompok2_UART_SPI_MQTT_LoRa_2ESP32/kelompok2_uart_spi_mqtt_lora_2esp32
+python "$PROJECT/Laptop_A/send_image.py" --help
 ```
+
+Penerima menyimpan transfer berjalan sebagai `.part` dan memindahkannya menjadi file gambar final hanya setelah ukuran serta CRC seluruh file cocok. END yang gagal validasi tidak diberi ACK sukses; transfer gagal perlu diperiksa dan diulang, bukan dianggap pulih otomatis.
 
 Saat pengujian gunakan port serial Linux yang benar, misalnya `/dev/ttyUSB0`, bukan `COM6`. Cocokkan port dengan board fisik sebelum upload. Isi Wi-Fi dan IP broker/penerima secara lokal sebelum pengujian.
 

@@ -92,7 +92,7 @@ def main():
                     if current_file:
                         current_file.close()
                     current_path = OUT_DIR / ("received_" + safe_name)
-                    current_file = open(current_path, "wb")
+                    current_file = open(current_path.with_suffix(current_path.suffix + ".part"), "wb")
                     expected_size = int(expected_size)
                     written_size = 0
                     whole_crc = 0
@@ -110,7 +110,7 @@ def main():
                     last_seq = seq
 
                 elif frame_type == TYPE_END:
-                    if current_file is None or len(payload) != 4 or seq != last_seq + 1:
+                    if current_file is None or current_path is None or len(payload) != 4 or seq != last_seq + 1:
                         print("END tidak valid/di luar urutan")
                         continue
                     expected_crc = struct.unpack("<I", payload)[0]
@@ -119,11 +119,15 @@ def main():
                     current_file = None
                     actual_crc = whole_crc & 0xFFFFFFFF
                     completed = (written_size == expected_size and actual_crc == expected_crc)
-                    last_seq = seq
                     print("File:", current_path)
                     print("Ukuran diterima:", written_size, "/", expected_size)
                     print("CRC file:", "COCOK" if actual_crc == expected_crc else "TIDAK COCOK")
                     print("Status:", "BERHASIL" if completed else "GAGAL")
+                    if not completed:
+                        # Never report end-to-end success for a corrupt/truncated file.
+                        continue
+                    current_path.with_suffix(current_path.suffix + ".part").replace(current_path)
+                    last_seq = seq
                 else:
                     print("Jenis frame tidak dikenal:", frame_type)
                     continue
