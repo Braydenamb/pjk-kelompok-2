@@ -1,5 +1,11 @@
 # PJK Kelompok 2 — UART → SPI → MQTT → LoRa
 
+> **Acuan final tim berubah:** `Panduan Proyek Empat Protokol.pdf` dipilih pengguna sebagai rancangan final. Jalur target: **Laptop A → USB/UART → ESP A → SPI → ESP B → MQTT melalui broker Laptop A → ESP A → E220 LoRa → ESP B → USB/UART → Laptop B**. ESP A sekarang SPI master/MQTT subscriber/LoRa transmitter; ESP B SPI slave/MQTT publisher/LoRa receiver. Target SPI CS=13, READY=27; E220 RX=16, TX=17, M0=25, M1=26, AUX tidak digunakan menurut panduan. Tidak ada UART kabel langsung antar-ESP atau TCP penerima dalam rancangan final ini.
+>
+> **Kode dan launcher di bawah masih implementasi rancangan sebelumnya, belum dimigrasi ke panduan final. Jangan mencampurkan wiring baru dengan firmware lama.** PDF menyebut paket kode terpisah pada halaman 19–20; isi ZIP final belum tersedia di folder saat pengecekan. Hasil build/tes sebelumnya hanya berlaku untuk implementasi lama. Detail pengaturan radio dan keamanan catu tetap perlu diverifikasi, bukan otomatis disahkan oleh PDF.
+
+## Implementasi sebelumnya (belum dimigrasi)
+
 Dua ESP32 dipakai bergantian untuk pengiriman gambar:
 
 ```text
